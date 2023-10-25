@@ -5,7 +5,6 @@
  * Copyright (c) 2017-2020, Silicon Laboratories, Inc.
  * Copyright (c) 2010, ST-Ericsson
  */
-#include <linux/version.h>
 #include <net/mac80211.h>
 
 #include "scan.h"
@@ -13,28 +12,13 @@
 #include "sta.h"
 #include "hif_tx_mib.h"
 
-#if (KERNEL_VERSION(4, 13, 0) > LINUX_VERSION_CODE)
-static inline void *skb_put_data(struct sk_buff *skb, const void *data, unsigned int len)
-{
-	void *tmp = skb_put(skb, len);
-
-	memcpy(tmp, data, len);
-
-	return tmp;
-}
-#endif
-
 static void wfx_ieee80211_scan_completed_compat(struct ieee80211_hw *hw, bool aborted)
 {
-#if (KERNEL_VERSION(4, 8, 0) > LINUX_VERSION_CODE)
-	ieee80211_scan_completed(hw, aborted);
-#else
 	struct cfg80211_scan_info info = {
 		.aborted = aborted,
 	};
 
 	ieee80211_scan_completed(hw, &info);
-#endif
 }
 
 static int update_probe_tmpl(struct wfx_vif *wvif, struct cfg80211_scan_request *req)
@@ -42,11 +26,8 @@ static int update_probe_tmpl(struct wfx_vif *wvif, struct cfg80211_scan_request 
 	struct ieee80211_vif *vif = wvif_to_vif(wvif);
 	struct sk_buff *skb;
 
-#if (KERNEL_VERSION(3, 19, 0) > LINUX_VERSION_CODE)
-	skb = ieee80211_probereq_get(wvif->wdev->hw, vif, NULL, 0, req->ie_len);
-#else
-	skb = ieee80211_probereq_get(wvif->wdev->hw, vif->addr, NULL, 0, req->ie_len);
-#endif
+	skb = ieee80211_probereq_get(wvif->wdev->hw, vif->addr, NULL, 0,
+				     req->ie_len);
 	if (!skb)
 		return -ENOMEM;
 
@@ -114,7 +95,7 @@ void wfx_hw_scan_work(struct work_struct *work)
 	int chan_cur, ret, err;
 
 	mutex_lock(&wvif->wdev->conf_mutex);
-	mutex_lock(&wvif->wdev->scan_lock);
+	mutex_lock(&wvif->scan_lock);
 	if (wvif->join_in_progress) {
 		dev_info(wvif->wdev->dev, "abort in-progress REQ_JOIN");
 		wfx_reset(wvif);
@@ -135,7 +116,7 @@ void wfx_hw_scan_work(struct work_struct *work)
 			ret = -ETIMEDOUT;
 		}
 	} while (ret >= 0 && chan_cur < hw_req->req.n_channels);
-	mutex_unlock(&wvif->wdev->scan_lock);
+	mutex_unlock(&wvif->scan_lock);
 	mutex_unlock(&wvif->wdev->conf_mutex);
 	wfx_ieee80211_scan_completed_compat(wvif->wdev->hw, ret < 0);
 }
@@ -164,81 +145,3 @@ void wfx_scan_complete(struct wfx_vif *wvif, int nb_chan_done)
 	wvif->scan_nb_chan_done = nb_chan_done;
 	complete(&wvif->scan_complete);
 }
-
-void wfx_remain_on_channel_work(struct work_struct *work)
-{
-	struct wfx_vif *wvif = container_of(work, struct wfx_vif, remain_on_channel_work);
-	struct ieee80211_channel *chan = wvif->remain_on_channel_chan;
-	int duration = wvif->remain_on_channel_duration;
-	int ret;
-
-	/* Hijack scan request to implement Remain-On-Channel */
-	mutex_lock(&wvif->wdev->conf_mutex);
-	mutex_lock(&wvif->wdev->scan_lock);
-	if (wvif->join_in_progress) {
-		dev_info(wvif->wdev->dev, "abort in-progress REQ_JOIN");
-		wfx_reset(wvif);
-	}
-	wfx_tx_flush(wvif->wdev);
-
-	reinit_completion(&wvif->scan_complete);
-	ret = wfx_hif_scan_uniq(wvif, chan, duration);
-	if (ret)
-		goto end;
-	ieee80211_ready_on_channel(wvif->wdev->hw);
-	ret = wait_for_completion_timeout(&wvif->scan_complete,
-					  msecs_to_jiffies(duration * 120 / 100));
-	if (!ret) {
-		wfx_hif_stop_scan(wvif);
-		ret = wait_for_completion_timeout(&wvif->scan_complete, 1 * HZ);
-		dev_dbg(wvif->wdev->dev, "roc timeout\n");
-	}
-	if (!ret)
-		dev_err(wvif->wdev->dev, "roc didn't stop\n");
-	ieee80211_remain_on_channel_expired(wvif->wdev->hw);
-end:
-	mutex_unlock(&wvif->wdev->scan_lock);
-	mutex_unlock(&wvif->wdev->conf_mutex);
-	wfx_bh_request_tx(wvif->wdev);
-}
-
-int wfx_remain_on_channel(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-			  struct ieee80211_channel *chan, int duration,
-			  enum ieee80211_roc_type type)
-{
-	struct wfx_dev *wdev = hw->priv;
-	struct wfx_vif *wvif = (struct wfx_vif *)vif->drv_priv;
-
-	if (wfx_api_older_than(wdev, 3, 10))
-		return -EOPNOTSUPP;
-
-	wvif->remain_on_channel_duration = duration;
-	wvif->remain_on_channel_chan = chan;
-	schedule_work(&wvif->remain_on_channel_work);
-	return 0;
-}
-
-#if (KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE)
-int wfx_cancel_remain_on_channel(struct ieee80211_hw *hw)
-{
-	struct wfx_dev *wdev = hw->priv;
-	struct wfx_vif *wvif = NULL;
-
-	while ((wvif = wvif_iterate(wdev, wvif)) != NULL) {
-		wfx_hif_stop_scan(wvif);
-		flush_work(&wvif->remain_on_channel_work);
-	}
-
-	return 0;
-}
-#else
-int wfx_cancel_remain_on_channel(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
-{
-	struct wfx_vif *wvif = (struct wfx_vif *)vif->drv_priv;
-
-	wfx_hif_stop_scan(wvif);
-	flush_work(&wvif->remain_on_channel_work);
-	return 0;
-}
-#endif
-

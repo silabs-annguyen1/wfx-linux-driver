@@ -5,7 +5,6 @@
  * Copyright (c) 2017-2020, Silicon Laboratories, Inc.
  * Copyright (c) 2010, ST-Ericsson
  */
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/mmc/sdio.h>
 #include <linux/mmc/sdio_func.h>
@@ -14,29 +13,13 @@
 #include <linux/of_device.h>
 #include <linux/of_irq.h>
 #include <linux/irq.h>
+#include <linux/align.h>
 
 #include "bus.h"
 #include "wfx.h"
 #include "hwio.h"
 #include "main.h"
 #include "bh.h"
-
-#if (KERNEL_VERSION(5, 13, 0) <= LINUX_VERSION_CODE)
-#include <linux/align.h>
-#endif
-
-#if (KERNEL_VERSION(4, 2, 0) > LINUX_VERSION_CODE)
-static const void *of_device_get_match_data(const struct device *dev)
-{
-	const struct of_device_id *match;
-
-	match = of_match_device(dev->driver->of_match_table, dev);
-	if (!match)
-		return NULL;
-
-	return match->data;
-}
-#endif
 
 static const struct wfx_platform_data pdata_wf200 = {
 	.file_fw = "wfx/wfm_wf200",
@@ -56,12 +39,6 @@ static const struct wfx_platform_data pdata_brd8022a = {
 static const struct wfx_platform_data pdata_brd8023a = {
 	.file_fw = "wfx/wfm_wf200",
 	.file_pds = "wfx/brd8023a.pds",
-};
-
-/* Legacy DT don't use it */
-static const struct wfx_platform_data pdata_wfx_sdio = {
-	.file_fw = "wfm_wf200",
-	.file_pds = "wf200.pds",
 };
 
 struct wfx_sdio_priv {
@@ -210,15 +187,14 @@ static const struct of_device_id wfx_sdio_of_match[] = {
 	{ .compatible = "silabs,brd4001a", .data = &pdata_brd4001a },
 	{ .compatible = "silabs,brd8022a", .data = &pdata_brd8022a },
 	{ .compatible = "silabs,brd8023a", .data = &pdata_brd8023a },
-	{ .compatible = "silabs,wfx-sdio", .data = &pdata_wfx_sdio },
 	{ },
 };
 MODULE_DEVICE_TABLE(of, wfx_sdio_of_match);
 
 static int wfx_sdio_probe(struct sdio_func *func, const struct sdio_device_id *id)
 {
+	const struct wfx_platform_data *pdata = of_device_get_match_data(&func->dev);
 	struct device_node *np = func->dev.of_node;
-	const struct wfx_platform_data *pdata;
 	struct wfx_sdio_priv *bus;
 	int ret;
 
@@ -228,29 +204,18 @@ static int wfx_sdio_probe(struct sdio_func *func, const struct sdio_device_id *i
 		return -ENODEV;
 	}
 
+	if (!pdata) {
+		dev_warn(&func->dev, "no compatible device found in DT\n");
+		return -ENODEV;
+	}
+
 	bus = devm_kzalloc(&func->dev, sizeof(*bus), GFP_KERNEL);
 	if (!bus)
 		return -ENOMEM;
 
-	if (np) {
-		pdata = of_device_get_match_data(&func->dev);
-		if (!pdata) {
-			dev_warn(&func->dev, "no compatible device found in DT\n");
-			return -ENODEV;
-		}
-		bus->of_irq = irq_of_parse_and_map(np, 0);
-	} else {
-		dev_warn(&func->dev, "device is not declared in DT, features will be limited\n");
-		/* FIXME: ignore VID/PID and only rely on device tree */
-		// return -ENODEV;
-		pdata = &pdata_wf200;
-	}
-
 	bus->func = func;
+	bus->of_irq = irq_of_parse_and_map(np, 0);
 	sdio_set_drvdata(func, bus);
-	func->card->quirks |= MMC_QUIRK_LENIENT_FN0 |
-			      MMC_QUIRK_BLKSZ_FOR_BYTE_MODE |
-			      MMC_QUIRK_BROKEN_BYTE_MODE_512;
 
 	sdio_claim_host(func);
 	ret = sdio_enable_func(func);
@@ -292,8 +257,6 @@ static void wfx_sdio_remove(struct sdio_func *func)
 static const struct sdio_device_id wfx_sdio_ids[] = {
 	/* WF200 does not have official VID/PID */
 	{ SDIO_DEVICE(0x0000, 0x1000) },
-	/* FIXME: ignore VID/PID and only rely on device tree */
-	// { SDIO_DEVICE(SDIO_ANY_ID, SDIO_ANY_ID) },
 	{ },
 };
 MODULE_DEVICE_TABLE(sdio, wfx_sdio_ids);

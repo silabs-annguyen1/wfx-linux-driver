@@ -5,7 +5,6 @@
  * Copyright (c) 2017-2020, Silicon Laboratories, Inc.
  * Copyright (c) 2010, ST-Ericsson
  */
-#include <linux/version.h>
 #include <linux/etherdevice.h>
 #include <net/mac80211.h>
 
@@ -189,12 +188,7 @@ static int wfx_add_key(struct wfx_vif *wvif, struct ieee80211_sta *sta,
 			k.type = fill_sms4_group(&k.key.wapi_group_key, key);
 	} else if (key->cipher == WLAN_CIPHER_SUITE_AES_CMAC) {
 		k.type = fill_aes_cmac_group(&k.key.igtk_group_key, key, &seq);
-#if KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
-		wfx_free_key(wdev, idx);
-		return -EOPNOTSUPP;
-#else
 		key->flags |= IEEE80211_KEY_FLAG_GENERATE_MMIE;
-#endif
 	} else {
 		dev_warn(wdev->dev, "unsupported key type %d\n", key->cipher);
 		wfx_free_key(wdev, idx);
@@ -202,25 +196,10 @@ static int wfx_add_key(struct wfx_vif *wvif, struct ieee80211_sta *sta,
 	}
 	ret = wfx_hif_add_key(wdev, &k);
 	if (ret) {
-#if KERNEL_VERSION(4, 14, 0) > LINUX_VERSION_CODE
-#if KERNEL_VERSION(4, 9, 63) > LINUX_VERSION_CODE || KERNEL_VERSION(4, 10, 0) <= LINUX_VERSION_CODE
-#if KERNEL_VERSION(4, 4, 99) > LINUX_VERSION_CODE || KERNEL_VERSION(4, 5, 0) <= LINUX_VERSION_CODE
-		if (ret == HIF_STATUS_INVALID_PARAMETER) {
-			/* Use a patched kernel in order to solve this error */
-			dev_warn(wdev->dev, "chip prevents re-installation of same key\n");
-			dev_warn(wdev->dev, "your kernel is not patched to protect against KRACK attack\n");
-		}
-#endif
-#endif
-#endif
 		wfx_free_key(wdev, idx);
 		return -EOPNOTSUPP;
 	}
-#if (KERNEL_VERSION(3, 19, 0) > LINUX_VERSION_CODE)
-	key->flags |= IEEE80211_KEY_FLAG_PUT_IV_SPACE;
-#else
 	key->flags |= IEEE80211_KEY_FLAG_PUT_IV_SPACE | IEEE80211_KEY_FLAG_RESERVE_TAILROOM;
-#endif
 	key->hw_key_idx = idx;
 	return 0;
 }

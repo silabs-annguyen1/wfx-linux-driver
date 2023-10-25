@@ -10,66 +10,20 @@
 #ifndef WFX_H
 #define WFX_H
 
-#include <linux/version.h>
 #include <linux/completion.h>
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
+#include <linux/nospec.h>
 #include <net/mac80211.h>
 
 #include "bh.h"
 #include "data_tx.h"
 #include "main.h"
 #include "queue.h"
-#include "secure_link.h"
 #include "hif_tx.h"
 
 #define USEC_PER_TXOP 32 /* see struct ieee80211_tx_queue_params */
 #define USEC_PER_TU 1024
-
-#if (KERNEL_VERSION(4, 16, 0) > LINUX_VERSION_CODE)
-#define array_index_nospec(index, size) index
-#else
-#include <linux/nospec.h>
-#endif
-
-#if (KERNEL_VERSION(4, 2, 0) > LINUX_VERSION_CODE)
-static inline void _ieee80211_hw_set(struct ieee80211_hw *hw, enum ieee80211_hw_flags flg)
-{
-	hw->flags |= flg;
-}
-#define ieee80211_hw_set(hw, flg) _ieee80211_hw_set(hw, IEEE80211_HW_##flg)
-#endif
-
-#if (KERNEL_VERSION(4, 7, 0) > LINUX_VERSION_CODE)
-#define nl80211_band ieee80211_band
-#define NL80211_BAND_2GHZ IEEE80211_BAND_2GHZ
-#define NUM_NL80211_BANDS IEEE80211_NUM_BANDS
-#endif
-
-#if (KERNEL_VERSION(4, 1, 0) > LINUX_VERSION_CODE)
-/* In kernels < 4.1, if we transate these define with 0, it is sufficient to make cfg80211_get_bss()
- * happy. However, their values in kernel > 4.1 are not 0. So, only use them as parameters to
- * cfg80211_get_bss().
- */
-#define IEEE80211_BSS_TYPE_ANY 0
-#define IEEE80211_PRIVACY_ANY  0
-#endif
-
-#if (KERNEL_VERSION(4, 17, 0) > LINUX_VERSION_CODE)
-#define struct_size(p, member, n) \
-	(n * sizeof(*(p)->member) + __must_be_array((p)->member) + sizeof(*(p)))
-#endif
-
-#if KERNEL_VERSION(5, 3, 10) > LINUX_VERSION_CODE
-#if KERNEL_VERSION(4, 19, 83) > LINUX_VERSION_CODE || KERNEL_VERSION(4, 20, 0) < LINUX_VERSION_CODE
-#if KERNEL_VERSION(4, 14, 153) > LINUX_VERSION_CODE || KERNEL_VERSION(4, 15, 0) < LINUX_VERSION_CODE
-static inline bool skb_queue_empty_lockless(const struct sk_buff_head *list)
-{
-	return READ_ONCE(list->next) == (const struct sk_buff *) list;
-}
-#endif
-#endif
-#endif
 
 struct wfx_hwbus_ops;
 
@@ -86,11 +40,9 @@ struct wfx_dev {
 	struct completion          firmware_ready;
 	struct wfx_hif_ind_startup hw_caps;
 	struct wfx_hif             hif;
-	struct sl_context          sl;
 	struct delayed_work        cooling_timeout_work;
 	bool                       poll_irq;
 	bool                       chip_frozen;
-	struct mutex               scan_lock;
 	struct mutex               conf_mutex;
 
 	struct wfx_hif_cmd         hif_cmd;
@@ -106,11 +58,6 @@ struct wfx_dev {
 	struct wfx_hif_tx_power_loop_info tx_power_loop_info;
 	struct mutex               tx_power_loop_info_lock;
 	struct workqueue_struct    *bh_wq;
-	int                        force_ps_timeout;
-
-	bool                       pta_enable;
-	u32                        pta_priority;
-	struct wfx_hif_req_pta_settings pta_settings;
 };
 
 struct wfx_vif {
@@ -122,7 +69,6 @@ struct wfx_vif {
 
 	bool                       after_dtim_tx_allowed;
 	bool                       join_in_progress;
-	struct completion          set_pm_mode_complete;
 
 	struct delayed_work        beacon_loss_work;
 
@@ -134,15 +80,15 @@ struct wfx_vif {
 
 	unsigned long              uapsd_mask;
 
+	/* avoid some operations in parallel with scan */
+	struct mutex               scan_lock;
 	struct work_struct         scan_work;
 	struct completion          scan_complete;
 	int                        scan_nb_chan_done;
 	bool                       scan_abort;
 	struct ieee80211_scan_request *scan_req;
 
-	struct ieee80211_channel   *remain_on_channel_chan;
-	int                        remain_on_channel_duration;
-	struct work_struct         remain_on_channel_work;
+	struct completion          set_pm_mode_complete;
 };
 
 static inline struct ieee80211_vif *wvif_to_vif(struct wfx_vif *wvif)

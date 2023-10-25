@@ -5,7 +5,6 @@
  * Copyright (c) 2017-2020, Silicon Laboratories, Inc.
  * Copyright (c) 2010, ST-Ericsson
  */
-#include <linux/version.h>
 #include <linux/etherdevice.h>
 #include <net/mac80211.h>
 
@@ -58,11 +57,7 @@ void wfx_rx_cb(struct wfx_vif *wvif, const struct wfx_hif_ind_rx *arg, struct sk
 	hdr->freq = ieee80211_channel_to_frequency(arg->channel_number, hdr->band);
 
 	if (arg->rxed_rate >= 14) {
-#if (KERNEL_VERSION(4, 12, 0) > LINUX_VERSION_CODE)
-		hdr->flag |= RX_FLAG_HT;
-#else
 		hdr->encoding = RX_ENC_HT;
-#endif
 		hdr->rate_idx = arg->rxed_rate - 14;
 	} else if (arg->rxed_rate >= 4) {
 		hdr->rate_idx = arg->rxed_rate - 2;

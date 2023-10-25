@@ -15,20 +15,6 @@
 
 #include "hif_api_general.h"
 
-#if (KERNEL_VERSION(4, 6, 0) > LINUX_VERSION_CODE)
-static inline int devm_add_action_or_reset(struct device *dev,
-					   void (*action)(void *), void *data)
-{
-	int ret;
-
-	ret = devm_add_action(dev, action, data);
-	if (ret)
-		action(data);
-
-	return ret;
-}
-#endif
-
 struct wfx_dev;
 struct wfx_hwbus_ops;
 
@@ -37,14 +23,10 @@ struct wfx_platform_data {
 	const char *file_fw;
 	const char *file_pds;
 	struct gpio_desc *gpio_wakeup;
-	bool reset_inverted;
 	/* if true HIF D_out is sampled on the rising edge of the clock (intended to be used in
 	 * 50Mhz SDIO)
 	 */
 	bool use_rising_clk;
-#ifdef CONFIG_WFX_SECURE_LINK
-	u8 slk_key[API_KEY_VALUE_SIZE];
-#endif
 };
 
 struct wfx_dev *wfx_init_common(struct device *dev, const struct wfx_platform_data *pdata,

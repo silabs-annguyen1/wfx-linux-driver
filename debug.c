@@ -5,15 +5,9 @@
  * Copyright (c) 2017-2020, Silicon Laboratories, Inc.
  * Copyright (c) 2010, ST-Ericsson
  */
-#include <linux/version.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/crc32.h>
-#if (KERNEL_VERSION(4, 1, 0) > LINUX_VERSION_CODE)
-#include <linux/ftrace_event.h>
-#else
-#include <linux/trace_events.h>
-#endif
 
 #include "debug.h"
 #include "wfx.h"
@@ -24,39 +18,6 @@
 
 #define CREATE_TRACE_POINTS
 #include "traces.h"
-
-#if (KERNEL_VERSION(4, 17, 0) > LINUX_VERSION_CODE)
-#define DEFINE_SHOW_ATTRIBUTE(__name) \
-static int __name ## _open(struct inode *inode, struct file *file)      \
-{                                                                       \
-	return single_open(file, __name ## _show, inode->i_private);    \
-}                                                                       \
-                                                                        \
-static const struct file_operations __name ## _fops = {                 \
-	.owner   = THIS_MODULE,                                         \
-	.open    = __name ## _open,                                     \
-	.read    = seq_read,                                            \
-	.llseek  = seq_lseek,                                           \
-	.release = single_release,                                      \
-}
-#endif
-
-#if (KERNEL_VERSION(4, 7, 0) > LINUX_VERSION_CODE)
-#define DEFINE_DEBUGFS_ATTRIBUTE(__fops, __get, __set, __fmt)           \
-static int __fops ## _open(struct inode *inode, struct file *file)      \
-{                                                                       \
-	__simple_attr_check_format(__fmt, 0ull);                        \
-	return simple_attr_open(inode, file, __get, __set, __fmt);      \
-}                                                                       \
-static const struct file_operations __fops = {                          \
-	.owner   = THIS_MODULE,                                         \
-	.open    = __fops ## _open,                                     \
-	.release = simple_attr_release,                                 \
-	.read    = simple_attr_read,                                    \
-	.write   = simple_attr_write,                                   \
-	.llseek  = generic_file_llseek,                                 \
-}
-#endif
 
 static const struct trace_print_flags hif_msg_print_map[] = {
 	hif_msg_list,
@@ -268,67 +229,6 @@ static const struct file_operations wfx_send_pds_fops = {
 	.write = wfx_send_pds_write,
 };
 
-#ifdef CONFIG_WFX_SECURE_LINK
-static ssize_t wfx_burn_slk_key_write(struct file *file, const char __user *user_buf,
-				      size_t count, loff_t *ppos)
-{
-	struct wfx_dev *wdev = file->private_data;
-	char bin_buf[API_KEY_VALUE_SIZE + 4];
-	u32 *user_crc32 = (u32 *)(bin_buf + API_KEY_VALUE_SIZE);
-	char ascii_buf[(API_KEY_VALUE_SIZE + 4) * 2];
-	u32 crc32;
-	int ret;
-
-	if (wdev->hw_caps.link_mode == SEC_LINK_ENFORCED) {
-		dev_err(wdev->dev, "key was already burned on this device\n");
-		return -EINVAL;
-	}
-	if (wdev->hw_caps.link_mode != SEC_LINK_EVAL) {
-		dev_err(wdev->dev, "this device does not support secure link\n");
-		return -EINVAL;
-	}
-	if (*ppos != 0) {
-		dev_dbg(wdev->dev, "secret data must be written in one transaction\n");
-		return -EBUSY;
-	}
-	*ppos = *ppos + count;
-
-	if (copy_from_user(ascii_buf, user_buf, min(count, sizeof(ascii_buf))))
-		return -EFAULT;
-	ret = hex2bin(bin_buf, ascii_buf, sizeof(bin_buf));
-	if (ret) {
-		dev_info(wdev->dev, "ignoring malformatted key: %s\n",
-			 ascii_buf);
-		return -EINVAL;
-	}
-	crc32 = crc32(0xffffffff, bin_buf, API_KEY_VALUE_SIZE) ^ 0xffffffff;
-	if (crc32 != *user_crc32) {
-		dev_err(wdev->dev, "incorrect crc32: %08x != %08x\n", crc32, *user_crc32);
-		return -EINVAL;
-	}
-	ret = wfx_hif_sl_set_mac_key(wdev, bin_buf, SL_MAC_KEY_DEST_OTP);
-	if (ret) {
-		dev_err(wdev->dev, "chip returned error %d\n", ret);
-		return -EIO;
-	}
-	return count;
-}
-#else
-static ssize_t wfx_burn_slk_key_write(struct file *file, const char __user *user_buf,
-				      size_t count, loff_t *ppos)
-{
-	struct wfx_dev *wdev = file->private_data;
-
-	dev_info(wdev->dev, "this driver does not support secure link\n");
-	return -EINVAL;
-}
-#endif
-
-static const struct file_operations wfx_burn_slk_key_fops = {
-	.open = simple_open,
-	.write = wfx_burn_slk_key_write,
-};
-
 struct dbgfs_hif_msg {
 	struct wfx_dev *wdev;
 	struct completion complete;
@@ -416,29 +316,6 @@ static const struct file_operations wfx_send_hif_msg_fops = {
 	.read = wfx_send_hif_msg_read,
 };
 
-static int wfx_ps_timeout_set(void *data, u64 val)
-{
-	struct wfx_dev *wdev = (struct wfx_dev *)data;
-	struct wfx_vif *wvif;
-
-	wdev->force_ps_timeout = val;
-	wvif = NULL;
-	while ((wvif = wvif_iterate(wdev, wvif)) != NULL)
-		wfx_update_pm(wvif);
-	return 0;
-}
-
-static int wfx_ps_timeout_get(void *data, u64 *val)
-{
-	struct wfx_dev *wdev = (struct wfx_dev *)data;
-
-	*val = wdev->force_ps_timeout;
-	return 0;
-}
-
-DEFINE_DEBUGFS_ATTRIBUTE(wfx_ps_timeout_fops, wfx_ps_timeout_get, wfx_ps_timeout_set, "%lld\n");
-
-
 int wfx_debug_init(struct wfx_dev *wdev)
 {
 	struct dentry *d;
@@ -448,9 +325,7 @@ int wfx_debug_init(struct wfx_dev *wdev)
 	debugfs_create_file("rx_stats", 0444, d, wdev, &wfx_rx_stats_fops);
 	debugfs_create_file("tx_power_loop", 0444, d, wdev, &wfx_tx_power_loop_fops);
 	debugfs_create_file("send_pds", 0200, d, wdev, &wfx_send_pds_fops);
-	debugfs_create_file("burn_slk_key", 0200, d, wdev, &wfx_burn_slk_key_fops);
 	debugfs_create_file("send_hif_msg", 0600, d, wdev, &wfx_send_hif_msg_fops);
-	debugfs_create_file("ps_timeout", 0600, d, wdev, &wfx_ps_timeout_fops);
 
 	return 0;
 }

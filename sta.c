@@ -5,7 +5,6 @@
  * Copyright (c) 2017-2020, Silicon Laboratories, Inc.
  * Copyright (c) 2010, ST-Ericsson
  */
-#include <linux/version.h>
 #include <linux/etherdevice.h>
 #include <net/mac80211.h>
 
@@ -21,15 +20,23 @@
 
 #define HIF_MAX_ARP_IP_ADDRTABLE_ENTRIES 2
 
-#if (KERNEL_VERSION(4, 15, 0) > LINUX_VERSION_CODE)
-static __always_inline void assign_bit(long nr, volatile unsigned long *addr, bool value)
+u32 wfx_rate_mask_to_hw(struct wfx_dev *wdev, u32 rates)
 {
-	if (value)
-		set_bit(nr, addr);
-	else
-		clear_bit(nr, addr);
+	int i;
+	u32 ret = 0;
+	/* The device only supports 2GHz */
+	struct ieee80211_supported_band *sband = wdev->hw->wiphy->bands[NL80211_BAND_2GHZ];
+
+	for (i = 0; i < sband->n_bitrates; i++) {
+		if (rates & BIT(i)) {
+			if (i >= sband->n_bitrates)
+				dev_warn(wdev->dev, "unsupported basic rate\n");
+			else
+				ret |= BIT(sband->bitrates[i].hw_value);
+		}
+	}
+	return ret;
 }
-#endif
 
 void wfx_cooling_timeout_work(struct work_struct *work)
 {
@@ -107,12 +114,10 @@ void wfx_configure_filter(struct ieee80211_hw *hw, unsigned int changed_flags,
 	*total_flags &= FIF_BCN_PRBRESP_PROMISC | FIF_ALLMULTI | FIF_OTHER_BSS |
 			FIF_PROBE_REQ | FIF_PSPOLL;
 
-	/* Filters are ignored during the scan. No frames are filtered. */
-	if (mutex_is_locked(&wdev->scan_lock))
-		return;
-
 	mutex_lock(&wdev->conf_mutex);
 	while ((wvif = wvif_iterate(wdev, wvif)) != NULL) {
+		mutex_lock(&wvif->scan_lock);
+
 		/* Note: FIF_BCN_PRBRESP_PROMISC covers probe response and
 		 * beacons from other BSS
 		 */
@@ -139,6 +144,8 @@ void wfx_configure_filter(struct ieee80211_hw *hw, unsigned int changed_flags,
 		else
 			filter_prbreq = true;
 		wfx_hif_set_rx_filter(wvif, filter_bssid, filter_prbreq);
+
+		mutex_unlock(&wvif->scan_lock);
 	}
 	mutex_unlock(&wdev->conf_mutex);
 }
@@ -149,7 +156,7 @@ static int wfx_get_ps_timeout(struct wfx_vif *wvif, bool *enable_ps)
 	struct ieee80211_conf *conf = &wvif->wdev->hw->conf;
 	struct ieee80211_vif *vif = wvif_to_vif(wvif);
 
-	WARN(!vif->bss_conf.assoc && enable_ps,
+	WARN(!vif->cfg.assoc && enable_ps,
 	     "enable_ps is reliable only if associated");
 	if (wdev_to_wvif(wvif->wdev, 0)) {
 		struct wfx_vif *wvif_ch0 = wdev_to_wvif(wvif->wdev, 0);
@@ -168,25 +175,21 @@ static int wfx_get_ps_timeout(struct wfx_vif *wvif, bool *enable_ps)
 			/* It is useless to enable PS if channels are the same. */
 			if (enable_ps)
 				*enable_ps = false;
-			if (vif->bss_conf.assoc && vif->bss_conf.ps)
+			if (vif->cfg.assoc && vif->cfg.ps)
 				dev_info(wvif->wdev->dev, "ignoring requested PS mode");
 			return -1;
 		}
 		/* It is necessary to enable PS if channels are different. */
 		if (enable_ps)
 			*enable_ps = true;
-		if (wvif->wdev->force_ps_timeout > -1)
-			return wvif->wdev->force_ps_timeout;
-		else if (wfx_api_older_than(wvif->wdev, 3, 2))
+		if (wfx_api_older_than(wvif->wdev, 3, 2))
 			return 0;
 		else
 			return 30;
 	}
 	if (enable_ps)
-		*enable_ps = vif->bss_conf.ps;
-	if (wvif->wdev->force_ps_timeout > -1)
-		return wvif->wdev->force_ps_timeout;
-	else if (vif->bss_conf.assoc && vif->bss_conf.ps)
+		*enable_ps = vif->cfg.ps;
+	if (vif->cfg.assoc && vif->cfg.ps)
 		return conf->dynamic_ps_timeout;
 	else
 		return -1;
@@ -198,7 +201,7 @@ int wfx_update_pm(struct wfx_vif *wvif)
 	int ps_timeout;
 	bool ps;
 
-	if (!vif->bss_conf.assoc)
+	if (!vif->cfg.assoc)
 		return 0;
 	ps_timeout = wfx_get_ps_timeout(wvif, &ps);
 	if (!ps)
@@ -213,7 +216,8 @@ int wfx_update_pm(struct wfx_vif *wvif)
 }
 
 int wfx_conf_tx(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-		u16 queue, const struct ieee80211_tx_queue_params *params)
+		unsigned int link_id, u16 queue,
+		const struct ieee80211_tx_queue_params *params)
 {
 	struct wfx_dev *wdev = hw->priv;
 	struct wfx_vif *wvif = (struct wfx_vif *)vif->drv_priv;
@@ -257,11 +261,7 @@ void wfx_event_report_rssi(struct wfx_vif *wvif, u8 raw_rcpi_rssi)
 		cqm_evt = NL80211_CQM_RSSI_THRESHOLD_EVENT_LOW;
 	else
 		cqm_evt = NL80211_CQM_RSSI_THRESHOLD_EVENT_HIGH;
-#if (KERNEL_VERSION(4, 11, 0) > LINUX_VERSION_CODE)
-	ieee80211_cqm_rssi_notify(vif, cqm_evt, GFP_KERNEL);
-#else
 	ieee80211_cqm_rssi_notify(vif, cqm_evt, rcpi_rssi, GFP_KERNEL);
-#endif
 }
 
 static void wfx_beacon_loss_work(struct work_struct *work)
@@ -306,13 +306,8 @@ int wfx_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee8
 
 	sta_priv->vif_id = wvif->id;
 
-#if (KERNEL_VERSION(3, 20, 0) <= LINUX_VERSION_CODE)
-	/* Kernel < 3.20 may encounter problems to negociate BlockAck with MFP enabled. You may
-	 * backport 64a8cef41 to solve it.
-	 */
 	if (vif->type == NL80211_IFTYPE_STATION)
 		wfx_hif_set_mfp(wvif, sta->mfp, sta->mfp);
-#endif
 
 	/* In station mode, the firmware interprets new link-id as a TDLS peer */
 	if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls)
@@ -321,11 +316,7 @@ int wfx_sta_add(struct ieee80211_hw *hw, struct ieee80211_vif *vif, struct ieee8
 	wvif->link_id_map |= BIT(sta_priv->link_id);
 	WARN_ON(!sta_priv->link_id);
 	WARN_ON(sta_priv->link_id >= HIF_LINK_ID_MAX);
-#if (KERNEL_VERSION(3, 20, 0) > LINUX_VERSION_CODE)
-	wfx_hif_map_link(wvif, false, sta->addr, sta_priv->link_id, false);
-#else
 	wfx_hif_map_link(wvif, false, sta->addr, sta_priv->link_id, sta->mfp);
-#endif
 
 	return 0;
 }
@@ -349,7 +340,7 @@ static int wfx_upload_ap_templates(struct wfx_vif *wvif)
 	struct ieee80211_vif *vif = wvif_to_vif(wvif);
 	struct sk_buff *skb;
 
-	skb = ieee80211_beacon_get(wvif->wdev->hw, vif);
+	skb = ieee80211_beacon_get(wvif->wdev->hw, vif, 0);
 	if (!skb)
 		return -ENOMEM;
 	wfx_hif_set_template_frame(wvif, skb, HIF_TMPLT_BCN, API_RATE_INDEX_B_1MBPS);
@@ -366,7 +357,7 @@ static int wfx_upload_ap_templates(struct wfx_vif *wvif)
 static void wfx_set_mfp_ap(struct wfx_vif *wvif)
 {
 	struct ieee80211_vif *vif = wvif_to_vif(wvif);
-	struct sk_buff *skb = ieee80211_beacon_get(wvif->wdev->hw, vif);
+	struct sk_buff *skb = ieee80211_beacon_get(wvif->wdev->hw, vif, 0);
 	const int ieoffset = offsetof(struct ieee80211_mgmt, u.beacon.variable);
 	const u16 *ptr = (u16 *)cfg80211_find_ie(WLAN_EID_RSN, skb->data + ieoffset,
 						 skb->len - ieoffset);
@@ -388,7 +379,8 @@ static void wfx_set_mfp_ap(struct wfx_vif *wvif)
 	}
 }
 
-int wfx_start_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+int wfx_start_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+		 struct ieee80211_bss_conf *link_conf)
 {
 	struct wfx_vif *wvif = (struct wfx_vif *)vif->drv_priv;
 	struct wfx_dev *wdev = wvif->wdev;
@@ -406,15 +398,11 @@ int wfx_start_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	return ret;
 }
 
-void wfx_stop_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+void wfx_stop_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+		 struct ieee80211_bss_conf *link_conf)
 {
 	struct wfx_vif *wvif = (struct wfx_vif *)vif->drv_priv;
-	struct wfx_dev *wdev = wvif->wdev;
 
-	wvif =  NULL;
-	while ((wvif = wvif_iterate(wdev, wvif)) != NULL)
-		wfx_update_pm(wvif);
-	wvif = (struct wfx_vif *)vif->drv_priv;
 	wfx_reset(wvif);
 }
 
@@ -432,7 +420,7 @@ static void wfx_join(struct wfx_vif *wvif)
 
 	bss = cfg80211_get_bss(wvif->wdev->hw->wiphy, wvif->channel, conf->bssid, NULL, 0,
 			       IEEE80211_BSS_TYPE_ANY, IEEE80211_PRIVACY_ANY);
-	if (!bss && !conf->ibss_joined) {
+	if (!bss && !vif->cfg.ibss_joined) {
 		wfx_tx_unlock(wvif->wdev);
 		return;
 	}
@@ -473,20 +461,20 @@ static void wfx_join_finalize(struct wfx_vif *wvif, struct ieee80211_bss_conf *i
 	bool greenfield = false;
 
 	rcu_read_lock(); /* protect sta */
-	if (info->bssid && !info->ibss_joined)
+	if (info->bssid && !vif->cfg.ibss_joined)
 		sta = ieee80211_find_sta(vif, info->bssid);
-	if (sta && sta->ht_cap.ht_supported)
-		ampdu_density = sta->ht_cap.ampdu_density;
-	if (sta && sta->ht_cap.ht_supported &&
+	if (sta && sta->deflink.ht_cap.ht_supported)
+		ampdu_density = sta->deflink.ht_cap.ampdu_density;
+	if (sta && sta->deflink.ht_cap.ht_supported &&
 	    !(info->ht_operation_mode & IEEE80211_HT_OP_MODE_NON_GF_STA_PRSNT))
-		greenfield = !!(sta->ht_cap.cap & IEEE80211_HT_CAP_GRN_FLD);
+		greenfield = !!(sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_GRN_FLD);
 	rcu_read_unlock();
 
 	wvif->join_in_progress = false;
 	wfx_hif_set_association_mode(wvif, ampdu_density, greenfield, info->use_short_preamble);
 	wfx_hif_keep_alive_period(wvif, 0);
 	/* beacon_loss_count is defined to 7 in net/mac80211/mlme.c. Let's use the same value. */
-	wfx_hif_set_bss_params(wvif, info->aid, 7);
+	wfx_hif_set_bss_params(wvif, vif->cfg.aid, 7);
 	wfx_hif_set_beacon_wakeup_period(wvif, 1, 1);
 	wfx_update_pm(wvif);
 }
@@ -521,7 +509,7 @@ static void wfx_enable_beacon(struct wfx_vif *wvif, bool enable)
 }
 
 void wfx_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-			  struct ieee80211_bss_conf *info, u32 changed)
+			  struct ieee80211_bss_conf *info, u64 changed)
 {
 	struct wfx_dev *wdev = hw->priv;
 	struct wfx_vif *wvif = (struct wfx_vif *)vif->drv_priv;
@@ -537,9 +525,9 @@ void wfx_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	}
 
 	if (changed & BSS_CHANGED_ASSOC) {
-		if (info->assoc || info->ibss_joined)
+		if (vif->cfg.assoc || vif->cfg.ibss_joined)
 			wfx_join_finalize(wvif, info);
-		else if (!info->assoc && vif->type == NL80211_IFTYPE_STATION)
+		else if (!vif->cfg.assoc && vif->type == NL80211_IFTYPE_STATION)
 			wfx_reset(wvif);
 		else
 			dev_warn(wdev->dev, "misunderstood change: ASSOC\n");
@@ -555,11 +543,11 @@ void wfx_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 
 	if (changed & BSS_CHANGED_ARP_FILTER) {
 		for (i = 0; i < HIF_MAX_ARP_IP_ADDRTABLE_ENTRIES; i++) {
-			__be32 *arp_addr = &info->arp_addr_list[i];
+			__be32 *arp_addr = &vif->cfg.arp_addr_list[i];
 
-			if (info->arp_addr_cnt > HIF_MAX_ARP_IP_ADDRTABLE_ENTRIES)
+			if (vif->cfg.arp_addr_cnt > HIF_MAX_ARP_IP_ADDRTABLE_ENTRIES)
 				arp_addr = NULL;
-			if (i >= info->arp_addr_cnt)
+			if (i >= vif->cfg.arp_addr_cnt)
 				arp_addr = NULL;
 			wfx_hif_set_arp_ipv4_filter(wvif, i, arp_addr);
 		}
@@ -571,11 +559,9 @@ void wfx_bss_info_changed(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	if (changed & BSS_CHANGED_BEACON_ENABLED)
 		wfx_enable_beacon(wvif, info->enable_beacon);
 
-#if (KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE)
 	if (changed & BSS_CHANGED_KEEP_ALIVE)
 		wfx_hif_keep_alive_period(wvif,
 					  info->max_idle_period * USEC_PER_TU / USEC_PER_MSEC);
-#endif
 
 	if (changed & BSS_CHANGED_ERP_CTS_PROT)
 		wfx_hif_erp_use_protection(wvif, info->use_cts_prot);
@@ -603,7 +589,7 @@ static int wfx_update_tim(struct wfx_vif *wvif)
 	u8 *tim_ptr;
 
 	skb = ieee80211_beacon_get_tim(wvif->wdev->hw, vif, &tim_offset,
-				       &tim_length);
+				       &tim_length, 0);
 	if (!skb)
 		return -ENOENT;
 	tim_ptr = skb->data + tim_offset;
@@ -648,14 +634,18 @@ int wfx_set_tim(struct ieee80211_hw *hw, struct ieee80211_sta *sta, bool set)
 
 void wfx_suspend_resume_mc(struct wfx_vif *wvif, enum sta_notify_cmd notify_cmd)
 {
+	struct wfx_vif *wvif_it;
+
 	if (notify_cmd != STA_NOTIFY_AWAKE)
 		return;
 
 	/* Device won't be able to honor CAB if a scan is in progress on any interface. Prefer to
 	 * skip this DTIM and wait for the next one.
 	 */
-	if (mutex_is_locked(&wvif->wdev->scan_lock))
-		return;
+	wvif_it = NULL;
+	while ((wvif_it = wvif_iterate(wvif->wdev, wvif_it)) != NULL)
+		if (mutex_is_locked(&wvif_it->scan_lock))
+			return;
 
 	if (!wfx_tx_queues_has_cab(wvif) || wvif->after_dtim_tx_allowed)
 		dev_warn(wvif->wdev->dev, "incorrect sequence (%d CAB in queue)",
@@ -664,29 +654,6 @@ void wfx_suspend_resume_mc(struct wfx_vif *wvif, enum sta_notify_cmd notify_cmd)
 	wfx_bh_request_tx(wvif->wdev);
 }
 
-#if (KERNEL_VERSION(4, 4, 69) > LINUX_VERSION_CODE) || \
-	(KERNEL_VERSION(4, 6, 0) > LINUX_VERSION_CODE && KERNEL_VERSION(4, 5, 0) <= LINUX_VERSION_CODE)
-#if (KERNEL_VERSION(4, 4, 0) > LINUX_VERSION_CODE)
-int wfx_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-		     enum ieee80211_ampdu_mlme_action action, struct ieee80211_sta *sta,
-		     u16 tid, u16 *ssn, u8 buf_size)
-#else
-int wfx_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-		     enum ieee80211_ampdu_mlme_action action, struct ieee80211_sta *sta,
-		     u16 tid, u16 *ssn, u8 buf_size, bool amsdu)
-#endif
-{
-	/* Aggregation is implemented fully in firmware */
-	switch (action) {
-	case IEEE80211_AMPDU_RX_START:
-	case IEEE80211_AMPDU_RX_STOP:
-		/* Just acknowledge it to enable frame re-ordering */
-		return 0;
-	default:
-		/* Leave the firmware doing its business for tx aggregation */
-		return -EOPNOTSUPP;
-	}}
-#else
 int wfx_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 		     struct ieee80211_ampdu_params *params)
 {
@@ -701,7 +668,6 @@ int wfx_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 		return -EOPNOTSUPP;
 	}
 }
-#endif
 
 int wfx_add_chanctx(struct ieee80211_hw *hw, struct ieee80211_chanctx_conf *conf)
 {
@@ -717,6 +683,7 @@ void wfx_change_chanctx(struct ieee80211_hw *hw, struct ieee80211_chanctx_conf *
 }
 
 int wfx_assign_vif_chanctx(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+			   struct ieee80211_bss_conf *link_conf,
 			   struct ieee80211_chanctx_conf *conf)
 {
 	struct wfx_vif *wvif = (struct wfx_vif *)vif->drv_priv;
@@ -729,6 +696,7 @@ int wfx_assign_vif_chanctx(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 }
 
 void wfx_unassign_vif_chanctx(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+			      struct ieee80211_bss_conf *link_conf,
 			      struct ieee80211_chanctx_conf *conf)
 {
 	struct wfx_vif *wvif = (struct wfx_vif *)vif->drv_priv;
@@ -750,9 +718,7 @@ int wfx_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	struct wfx_vif *wvif = (struct wfx_vif *)vif->drv_priv;
 
 	vif->driver_flags |= IEEE80211_VIF_BEACON_FILTER |
-#if (KERNEL_VERSION(3, 19, 0) <= LINUX_VERSION_CODE)
 			     IEEE80211_VIF_SUPPORTS_UAPSD |
-#endif
 			     IEEE80211_VIF_SUPPORTS_CQM_RSSI;
 
 	mutex_lock(&wdev->conf_mutex);
@@ -777,9 +743,9 @@ int wfx_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	complete(&wvif->set_pm_mode_complete);
 	INIT_WORK(&wvif->tx_policy_upload_work, wfx_tx_policy_upload_work);
 
+	mutex_init(&wvif->scan_lock);
 	init_completion(&wvif->scan_complete);
 	INIT_WORK(&wvif->scan_work, wfx_hw_scan_work);
-	INIT_WORK(&wvif->remain_on_channel_work, wfx_remain_on_channel_work);
 
 	wfx_tx_queues_init(wvif);
 	wfx_tx_policy_init(wvif);

@@ -14,7 +14,6 @@
 #include "bh.h"
 #include "sta.h"
 #include "data_rx.h"
-#include "secure_link.h"
 #include "hif_api_cmd.h"
 
 static int wfx_hif_generic_confirm(struct wfx_dev *wdev,
@@ -95,18 +94,6 @@ static int wfx_hif_wakeup_indication(struct wfx_dev *wdev,
 	return 0;
 }
 
-static int wfx_hif_keys_indication(struct wfx_dev *wdev,
-			       const struct wfx_hif_msg *hif, const void *buf)
-{
-	const struct wfx_hif_ind_sl_exchange_pub_keys *body = buf;
-
-	/* SL_PUB_KEY_EXCHANGE_STATUS_SUCCESS is used by legacy secure link */
-	if (body->status && body->status != HIF_STATUS_SLK_NEGO_SUCCESS)
-		dev_warn(wdev->dev, "secure link negotiation error\n");
-	wfx_sl_check_pubkey(wdev, body->ncp_pub_key, body->ncp_pub_key_mac);
-	return 0;
-}
-
 static int wfx_hif_receive_indication(struct wfx_dev *wdev, const struct wfx_hif_msg *hif,
 				      const void *buf, struct sk_buff *skb)
 {
@@ -121,22 +108,6 @@ static int wfx_hif_receive_indication(struct wfx_dev *wdev, const struct wfx_hif
 	wfx_rx_cb(wvif, body, skb);
 
 	return 0;
-}
-
-static void show_ps_error(struct wfx_dev *wdev, int error)
-{
-	if (error == HIF_PS_ERROR_AP_NOT_RESP_TO_POLL)
-		dev_warn(wdev->dev, "AP has not replied to Poll request\n");
-	else if (error == HIF_PS_ERROR_AP_NOT_RESP_TO_UAPSD_TRIGGER)
-		dev_warn(wdev->dev, "AP has not replied to UAPSD trigger\n");
-	else if (error == HIF_PS_ERROR_AP_SENT_UNICAST_IN_DOZE)
-		dev_warn(wdev->dev, "AP send unexpected data while the chip has been announced asleep\n");
-	else if (error == HIF_PS_ERROR_AP_NO_DATA_AFTER_TIM)
-		dev_warn(wdev->dev, "AP tx queue status mismatches the TIM. Power saving is suboptimal\n");
-	else if (error == HIF_PS_ERROR_AP_BEACON_TSF_JITTING)
-		dev_warn(wdev->dev, "AP beacon periods are unstable. Increasing wake-up duration\n");
-	else
-		dev_warn(wdev->dev, "power saving error: %d\n", error);
 }
 
 static int wfx_hif_event_indication(struct wfx_dev *wdev,
@@ -163,7 +134,8 @@ static int wfx_hif_event_indication(struct wfx_dev *wdev,
 		dev_dbg(wdev->dev, "ignore BSSREGAINED indication\n");
 		break;
 	case HIF_EVENT_IND_PS_MODE_ERROR:
-		show_ps_error(wdev, le32_to_cpu(body->event_data.ps_mode_error));
+		dev_warn(wdev->dev, "error while processing power save request: %d\n",
+			 le32_to_cpu(body->event_data.ps_mode_error));
 		break;
 	default:
 		dev_warn(wdev->dev, "unhandled event indication: %.2x\n", type);
@@ -378,7 +350,6 @@ static const struct {
 	{ HIF_IND_ID_SET_PM_MODE_CMPL,  wfx_hif_pm_mode_complete_indication },
 	{ HIF_IND_ID_SCAN_CMPL,         wfx_hif_scan_complete_indication },
 	{ HIF_IND_ID_SUSPEND_RESUME_TX, wfx_hif_suspend_resume_indication },
-	{ HIF_IND_ID_SL_EXCHANGE_PUB_KEYS, wfx_hif_keys_indication },
 	{ HIF_IND_ID_EVENT,             wfx_hif_event_indication },
 	{ HIF_IND_ID_GENERIC,           wfx_hif_generic_indication },
 	{ HIF_IND_ID_ERROR,             wfx_hif_error_indication },

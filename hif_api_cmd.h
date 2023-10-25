@@ -402,6 +402,7 @@ struct wfx_hif_ind_suspend_resume_tx {
 	__le16 peer_sta_set;
 } __packed;
 
+
 #define MAX_KEY_ENTRIES         24
 #define HIF_API_WEP_KEY_DATA_SIZE                       16
 #define HIF_API_TKIP_KEY_DATA_SIZE                      16
@@ -537,8 +538,7 @@ enum wfx_hif_ps_mode_error {
 	HIF_PS_ERROR_AP_NOT_RESP_TO_POLL           = 1,
 	HIF_PS_ERROR_AP_NOT_RESP_TO_UAPSD_TRIGGER  = 2,
 	HIF_PS_ERROR_AP_SENT_UNICAST_IN_DOZE       = 3,
-	HIF_PS_ERROR_AP_NO_DATA_AFTER_TIM          = 4,
-	HIF_PS_ERROR_AP_BEACON_TSF_JITTING         = 5
+	HIF_PS_ERROR_AP_NO_DATA_AFTER_TIM          = 4
 };
 
 struct wfx_hif_ind_event {

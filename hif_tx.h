@@ -19,13 +19,11 @@ struct ieee80211_bss_conf;
 struct ieee80211_tx_queue_params;
 struct cfg80211_scan_request;
 struct wfx_hif_req_add_key;
-struct wfx_hif_req_pta_settings;
 struct wfx_dev;
 struct wfx_vif;
 
 struct wfx_hif_cmd {
 	struct mutex       lock;
-	struct mutex       key_renew_lock;
 	struct completion  ready;
 	struct completion  done;
 	struct wfx_hif_msg *buf_send;
@@ -56,16 +54,8 @@ int wfx_hif_beacon_transmit(struct wfx_vif *wvif, bool enable);
 int wfx_hif_update_ie_beacon(struct wfx_vif *wvif, const u8 *ies, size_t ies_len);
 int wfx_hif_scan(struct wfx_vif *wvif, struct cfg80211_scan_request *req80211,
 		 int chan_start, int chan_num);
-int wfx_hif_scan_uniq(struct wfx_vif *wvif, struct ieee80211_channel *chan, int duration);
 int wfx_hif_stop_scan(struct wfx_vif *wvif);
 int wfx_hif_configuration(struct wfx_dev *wdev, const u8 *conf, size_t len);
 int wfx_hif_shutdown(struct wfx_dev *wdev);
-int wfx_hif_pta_settings(struct wfx_dev *wdev, const struct wfx_hif_req_pta_settings *parms);
-int wfx_hif_pta_priority(struct wfx_dev *wdev, u32 priority);
-int wfx_hif_pta_enable(struct wfx_dev *wdev, bool enable);
-int wfx_hif_burn_prevent_rollback(struct wfx_dev *wdev, u32 magic_word);
-int wfx_hif_sl_set_mac_key(struct wfx_dev *wdev, const u8 *slk_key, int destination);
-int wfx_hif_sl_config(struct wfx_dev *wdev, unsigned long *bitmap);
-int wfx_hif_sl_send_pub_keys(struct wfx_dev *wdev, const u8 *pubkey, const u8 *pubkey_hmac);
 
 #endif
